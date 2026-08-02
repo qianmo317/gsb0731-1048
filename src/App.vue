@@ -1,345 +1,288 @@
 <template>
   <div class="iot-monitor">
-    <el-container class="monitor-container">
-      <!-- 顶部设备选择区域 -->
-      <el-header class="header-section">
-        <div class="device-selector">
-          <el-select
-            v-model="selectedDevice"
-            placeholder="请选择设备"
-            size="large"
-            class="device-select"
-            @change="handleDeviceChange"
+    <header class="app-header">
+      <div class="header-brand">
+        <span class="brand-dot"></span>
+        <span class="brand-title">温湿度监控看板</span>
+        <el-tag size="small" :type="store.collecting ? 'success' : 'info'" effect="dark" class="live-tag">
+          <span class="live-dot"></span>{{ store.collecting ? '实时采集中' : '已停止' }}
+        </el-tag>
+      </div>
+      <div class="device-selector">
+        <el-select
+          ref="deviceSelectRef"
+          v-model="store.selectedDeviceIds"
+          multiple
+          collapse-tags
+          collapse-tags-tooltip
+          placeholder="请选择设备（可多选对比）"
+          size="large"
+          class="device-multi-select"
+          @change="handleDeviceChange"
+          @click.capture="handleSelectClick"
+        >
+          <el-option
+            v-for="device in store.devices"
+            :key="device.id"
+            :label="device.name"
+            :value="device.id"
           >
-            <el-option
-              v-for="device in deviceList"
-              :key="device.id"
-              :label="device.name"
-              :value="device.id"
-            />
-          </el-select>
-        </div>
-      </el-header>
+            <span class="device-option">
+              <span class="option-dot" :style="{ background: device.tempColor }"></span>
+              {{ device.name }}
+              <el-tag
+                v-if="unackedMap[device.id] > 0"
+                size="small"
+                type="danger"
+                effect="dark"
+                class="option-badge"
+              >{{ unackedMap[device.id] }}</el-tag>
+            </span>
+          </el-option>
+        </el-select>
+      </div>
+      <div class="header-time">
+        <span class="time-label">最近采集</span>
+        <span class="time-value">{{ lastCollectText }}</span>
+      </div>
+    </header>
 
-      <!-- 中间图表区域 -->
-      <el-main class="chart-section">
-        <el-card class="chart-card" shadow="hover">
+    <!-- 各设备未确认告警数统计汇总 -->
+    <div class="summary-bar">
+      <div
+        v-for="device in store.devices"
+        :key="device.id"
+        class="summary-chip"
+        :class="{
+          'is-active': store.selectedDeviceIds.includes(device.id),
+          'is-critical': severityMap[device.id] === 'critical',
+          'is-warning': severityMap[device.id] === 'warning',
+          'is-offline': isOffline(device.id)
+        }"
+        @click="toggleDevice(device.id)"
+      >
+        <span class="summary-name">
+          <span class="option-dot" :style="{ background: isOffline(device.id) ? '#909399' : device.tempColor }"></span>
+          {{ device.name }}
+        </span>
+        <span v-if="isOffline(device.id)" class="summary-offline">离线 {{ remainingSec(device.id) }}s</span>
+        <template v-else>
+          <span class="summary-count">{{ unackedMap[device.id] }}</span>
+          <span class="summary-label">未确认</span>
+        </template>
+      </div>
+      <div class="summary-hint">
+        <template v-if="store.selectedDeviceIds.length > 1">
+          同图对比中 · 阈值参考线与配置面板聚焦：<b>{{ focusDeviceName }}</b>
+        </template>
+        <template v-else>单设备视图 · 点击上方设备或汇总卡片可加入对比</template>
+      </div>
+    </div>
+
+    <main class="app-body">
+      <section class="upper-row">
+        <el-card class="panel chart-panel" shadow="hover">
           <template #header>
-            <div class="card-header">
-              <span class="card-title">温湿度趋势图</span>
+            <div class="panel-header">
+              <span class="panel-title">温湿度趋势图</span>
+              <span class="panel-sub">{{ chartSubtitle }}</span>
             </div>
           </template>
-          <div ref="chartContainer" class="chart-container"></div>
+          <div class="chart-wrap">
+            <TrendChart :device-ids="store.selectedDeviceIds" />
+          </div>
         </el-card>
-      </el-main>
 
-      <!-- 底部状态和控制区域 -->
-      <el-footer class="footer-section">
-        <el-row :gutter="20" class="status-row">
-          <el-col :span="8">
-            <el-card class="status-card temperature-card" shadow="hover">
-              <div class="status-content">
-                <div class="status-icon">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#F56C6C" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M14 4v10.54a4 4 0 1 1-4 0V4a2 2 0 0 1 4 0Z"></path>
-                  </svg>
-                </div>
-                <div class="status-info">
-                  <div class="status-label">当前温度</div>
-                  <div class="status-value">{{ currentTemperature }}°C</div>
-                </div>
+        <div class="side-col">
+          <ThresholdPanel :device-id="focusDeviceId" />
+        </div>
+      </section>
+
+      <section class="status-row">
+        <StatusCards :device-id="focusDeviceId" />
+        <el-card class="control-card" shadow="hover">
+          <div class="control-content">
+            <template v-if="focusOffline">
+              <div class="offline-indicator">
+                <span class="offline-spinner"></span>
+                <span class="offline-text">重启中 · 离线</span>
               </div>
-            </el-card>
-          </el-col>
-          <el-col :span="8">
-            <el-card class="status-card humidity-card" shadow="hover">
-              <div class="status-content">
-                <div class="status-icon">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#409EFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M17.5 21H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"></path>
-                    <path d="M22 10l-3-3m0 3l3-3"></path>
-                  </svg>
-                </div>
-                <div class="status-info">
-                  <div class="status-label">当前湿度</div>
-                  <div class="status-value">{{ currentHumidity }}%</div>
-                </div>
-              </div>
-            </el-card>
-          </el-col>
-          <el-col :span="8">
-            <el-card class="status-card control-card" shadow="hover">
-              <div class="status-content">
-                <el-button
-                  type="danger"
-                  size="large"
-                  :icon="Refresh"
-                  @click="handleRestart"
-                  class="restart-btn"
-                >
-                  设备重启
-                </el-button>
-              </div>
-            </el-card>
-          </el-col>
-        </el-row>
-      </el-footer>
-    </el-container>
+              <div class="offline-countdown">{{ focusRemainingSec }}<small>s</small></div>
+              <div class="control-hint">{{ focusDeviceName }} 即将自动恢复</div>
+            </template>
+            <template v-else>
+              <el-button
+                type="danger"
+                size="large"
+                :icon="Refresh"
+                class="restart-btn"
+                @click="handleRestart"
+              >
+                设备重启
+              </el-button>
+              <div class="control-hint">{{ focusDeviceName }}</div>
+            </template>
+          </div>
+        </el-card>
+      </section>
+
+      <section class="alert-row">
+        <AlertCenter />
+      </section>
+    </main>
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted, watch, nextTick } from 'vue'
+import { computed, ref, onMounted, onUnmounted } from 'vue'
 import { ElMessageBox, ElMessage } from 'element-plus'
 import { Refresh } from '@element-plus/icons-vue'
-import * as echarts from 'echarts'
+import { store, getDevice, getOfflineRemainingSec, isDeviceOnline } from './store/monitorStore'
+import { startCollector, stopCollector, restartDevice } from './modules/dataCollector'
+import { loadThresholds } from './modules/thresholdManager'
+import { loadAlerts } from './modules/alertManager'
+import { getMostUrgentDeviceId, getDeviceMaxSeverity, getUnacknowledgedCount } from './modules/alertEngine'
+import TrendChart from './components/TrendChart.vue'
+import ThresholdPanel from './components/ThresholdPanel.vue'
+import StatusCards from './components/StatusCards.vue'
+import AlertCenter from './components/AlertCenter.vue'
 
-// 设备列表
-const deviceList = ref([
-  { id: 'device1', name: '设备1' },
-  { id: 'device2', name: '设备2' },
-  { id: 'device3', name: '设备3' }
-])
+const lastCollectText = computed(() => {
+  if (!store.lastCollectAt) return '—'
+  return new Date(store.lastCollectAt).toLocaleTimeString('zh-CN', { hour12: false })
+})
 
-// 选中的设备
-const selectedDevice = ref('device1')
+const deviceSelectRef = ref(null)
 
-// 图表容器引用
-const chartContainer = ref(null)
-let chartInstance = null
-
-// 当前温湿度值
-const currentTemperature = ref(0)
-const currentHumidity = ref(0)
-
-// 模拟数据生成函数
-const generateMockData = (deviceId) => {
-  const data = []
-  const now = new Date()
-  
-  for (let i = 9; i >= 0; i--) {
-    const time = new Date(now.getTime() - i * 60000) // 每分钟一条数据
-    const temperature = 20 + Math.random() * 10 + (deviceId === 'device2' ? 2 : 0) + (deviceId === 'device3' ? -2 : 0)
-    const humidity = 50 + Math.random() * 20 + (deviceId === 'device2' ? 5 : 0) + (deviceId === 'device3' ? -5 : 0)
-    
-    data.push({
-      time: time.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }),
-      temperature: parseFloat(temperature.toFixed(1)),
-      humidity: parseFloat(humidity.toFixed(1))
-    })
+function handleSelectClick(e) {
+  const closeBtn = e.target.closest('.el-tag__close')
+  if (closeBtn) return
+  const tag = e.target.closest('.el-select__selected-item, .el-tag')
+  if (!tag) return
+  const inst = deviceSelectRef.value
+  if (!inst) return
+  e.stopPropagation()
+  if (typeof inst.toggleMenu === 'function') {
+    inst.toggleMenu()
+  } else if (typeof inst.handleOpen === 'function') {
+    inst.handleOpen()
   }
-  
-  return data
 }
 
-// 初始化图表
-const initChart = () => {
-  if (!chartContainer.value) return
-  
-  chartInstance = echarts.init(chartContainer.value)
-  updateChart()
-  
-  // 响应式调整
-  window.addEventListener('resize', () => {
-    chartInstance?.resize()
+// 焦点设备：多选时为告警最紧急的一台，单设备时即该台
+const focusDeviceId = computed(() => getMostUrgentDeviceId(store.selectedDeviceIds))
+
+const focusDeviceName = computed(() => {
+  const d = getDevice(focusDeviceId.value)
+  return d ? d.name : ''
+})
+
+const chartSubtitle = computed(() => {
+  if (store.selectedDeviceIds.length > 1) {
+    const names = store.selectedDeviceIds.map(id => {
+      const d = getDevice(id)
+      return d ? d.name : id
+    }).join(' / ')
+    return `${names} 对比 · 阈值参考线：${focusDeviceName.value}`
+  }
+  return `${focusDeviceName.value} · 阈值参考线与越限标记`
+})
+
+// 各设备未确认告警数
+const unackedMap = computed(() => {
+  const map = {}
+  store.devices.forEach(d => {
+    map[d.id] = getUnacknowledgedCount(d.id)
   })
+  return map
+})
+
+// 各设备当前最高活动告警级别
+const severityMap = computed(() => {
+  const map = {}
+  store.devices.forEach(d => {
+    map[d.id] = getDeviceMaxSeverity(d.id)
+  })
+  return map
+})
+
+// 每秒刷新一次，用于离线倒计时等依赖当前时间的显示
+const nowTick = ref(Date.now())
+let tickTimer = null
+
+// 焦点设备是否离线及剩余秒数（依赖 nowTick 以每秒刷新倒计时）
+const focusOffline = computed(() => {
+  nowTick.value
+  return focusDeviceId.value ? !isDeviceOnline(focusDeviceId.value) : false
+})
+const focusRemainingSec = computed(() => {
+  nowTick.value
+  return focusDeviceId.value ? getOfflineRemainingSec(focusDeviceId.value) : 0
+})
+
+// 各设备是否离线（供汇总芯片显示）
+function isOffline(id) {
+  nowTick.value
+  return !isDeviceOnline(id)
+}
+function remainingSec(id) {
+  nowTick.value
+  return getOfflineRemainingSec(id)
 }
 
-// 更新图表数据
-const updateChart = () => {
-  if (!chartInstance) return
-  
-  const data = generateMockData(selectedDevice.value)
-  
-  // 更新当前值（最新一条数据）
-  if (data.length > 0) {
-    currentTemperature.value = data[data.length - 1].temperature
-    currentHumidity.value = data[data.length - 1].humidity
+function toggleDevice(deviceId) {
+  const idx = store.selectedDeviceIds.indexOf(deviceId)
+  if (idx >= 0) {
+    if (store.selectedDeviceIds.length === 1) {
+      ElMessage.warning('至少保留一台设备')
+      return
+    }
+    store.selectedDeviceIds.splice(idx, 1)
+  } else {
+    store.selectedDeviceIds.push(deviceId)
   }
-  
-  const option = {
-    backgroundColor: 'transparent',
-    grid: {
-      left: '3%',
-      right: '4%',
-      bottom: '10%',
-      top: '10%',
-      containLabel: true
-    },
-    tooltip: {
-      trigger: 'axis',
-      backgroundColor: 'rgba(50, 50, 50, 0.9)',
-      borderColor: '#409EFF',
-      borderWidth: 1,
-      textStyle: {
-        color: '#fff'
-      }
-    },
-    legend: {
-      data: ['温度', '湿度'],
-      top: '5%',
-      textStyle: {
-        color: '#E4E7ED'
-      }
-    },
-    xAxis: {
-      type: 'category',
-      boundaryGap: false,
-      data: data.map(item => item.time),
-      axisLine: {
-        lineStyle: {
-          color: '#606266'
-        }
-      },
-      axisLabel: {
-        color: '#909399'
-      }
-    },
-    yAxis: [
-      {
-        type: 'value',
-        name: '温度(°C)',
-        position: 'left',
-        axisLine: {
-          lineStyle: {
-            color: '#409EFF'
-          }
-        },
-        axisLabel: {
-          color: '#909399',
-          formatter: '{value}°C'
-        },
-        splitLine: {
-          lineStyle: {
-            color: '#303133',
-            type: 'dashed'
-          }
-        }
-      },
-      {
-        type: 'value',
-        name: '湿度(%)',
-        position: 'right',
-        axisLine: {
-          lineStyle: {
-            color: '#67C23A'
-          }
-        },
-        axisLabel: {
-          color: '#909399',
-          formatter: '{value}%'
-        },
-        splitLine: {
-          show: false
-        }
-      }
-    ],
-    series: [
-      {
-        name: '温度',
-        type: 'line',
-        yAxisIndex: 0,
-        data: data.map(item => item.temperature),
-        smooth: true,
-        lineStyle: {
-          color: '#409EFF',
-          width: 2
-        },
-        itemStyle: {
-          color: '#409EFF'
-        },
-        areaStyle: {
-          color: {
-            type: 'linear',
-            x: 0,
-            y: 0,
-            x2: 0,
-            y2: 1,
-            colorStops: [
-              { offset: 0, color: 'rgba(64, 158, 255, 0.3)' },
-              { offset: 1, color: 'rgba(64, 158, 255, 0.05)' }
-            ]
-          }
-        }
-      },
-      {
-        name: '湿度',
-        type: 'line',
-        yAxisIndex: 1,
-        data: data.map(item => item.humidity),
-        smooth: true,
-        lineStyle: {
-          color: '#67C23A',
-          width: 2
-        },
-        itemStyle: {
-          color: '#67C23A'
-        },
-        areaStyle: {
-          color: {
-            type: 'linear',
-            x: 0,
-            y: 0,
-            x2: 0,
-            y2: 1,
-            colorStops: [
-              { offset: 0, color: 'rgba(103, 194, 58, 0.3)' },
-              { offset: 1, color: 'rgba(103, 194, 58, 0.05)' }
-            ]
-          }
-        }
-      }
-    ]
+}
+
+function handleDeviceChange(val) {
+  // 多选不允许清空，至少保留一台
+  if (!val || val.length === 0) {
+    ElMessage.warning('至少保留一台设备')
+    store.selectedDeviceIds = [store.devices[0].id]
   }
-  
-  chartInstance.setOption(option)
 }
 
-// 设备切换处理
-const handleDeviceChange = () => {
-  updateChart()
-}
-
-// 设备重启处理
 const handleRestart = () => {
+  if (focusOffline.value) {
+    ElMessage.info(`${focusDeviceName.value} 正在重启中，剩余 ${focusRemainingSec.value} 秒后自动恢复`)
+    return
+  }
   ElMessageBox.confirm(
-    '确定要重启该设备吗？重启后设备将短暂离线。',
+    `确定要重启${focusDeviceName.value}吗？确认后设备将离线约 1 分钟，期间曲线留空且不参与告警判定。`,
     '设备重启确认',
     {
-      confirmButtonText: '确定',
+      confirmButtonText: '确定重启',
       cancelButtonText: '取消',
-      type: 'warning',
-      customClass: 'restart-dialog'
+      type: 'warning'
     }
   )
     .then(() => {
-      ElMessage.success('设备重启指令已发送')
-      // 这里可以添加实际的重启逻辑
+      restartDevice(focusDeviceId.value)
+      ElMessage.success(`${focusDeviceName.value} 重启指令已下发，设备已离线，约 1 分钟后自动恢复`)
     })
-    .catch(() => {
-      // 用户取消操作
-    })
+    .catch(() => {})
 }
 
-// 监听设备变化
-watch(selectedDevice, () => {
-  updateChart()
-})
-
-// 组件挂载
 onMounted(() => {
-  nextTick(() => {
-    initChart()
-  })
+  // 先加载持久化的阈值与告警记录，再启动采集（采集会基于阈值做判定）
+  loadThresholds()
+  loadAlerts()
+  startCollector()
+  tickTimer = setInterval(() => { nowTick.value = Date.now() }, 1000)
 })
 
-// 组件卸载
 onUnmounted(() => {
-  if (chartInstance) {
-    chartInstance.dispose()
-    chartInstance = null
-  }
-  window.removeEventListener('resize', () => {})
+  stopCollector()
+  if (tickTimer) clearInterval(tickTimer)
 })
 </script>
 
@@ -349,187 +292,296 @@ onUnmounted(() => {
   height: 100vh;
   background: linear-gradient(135deg, #1e1e1e 0%, #2d2d2d 100%);
   overflow: hidden;
-}
-
-.monitor-container {
-  height: 100vh;
-  background: transparent;
-}
-
-/* 顶部区域 */
-.header-section {
-  height: 80px !important;
   display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(30, 30, 30, 0.8);
-  border-bottom: 2px solid #409EFF;
-  padding: 0 40px;
+  flex-direction: column;
 }
 
-.device-selector {
-  width: 100%;
-  max-width: 400px;
-}
-
-.device-select {
-  width: 100%;
-}
-
-.device-select :deep(.el-input__wrapper) {
-  background-color: rgba(45, 45, 45, 0.9);
-  border: 1px solid #409EFF;
-  box-shadow: 0 0 10px rgba(64, 158, 255, 0.3);
-}
-
-.device-select :deep(.el-input__inner) {
-  color: #E4E7ED;
-}
-
-.device-select :deep(.el-select__caret) {
-  color: #409EFF;
-}
-
-/* 图表区域 */
-.chart-section {
-  flex: 1;
-  padding: 30px 40px;
-  overflow: hidden;
-}
-
-.chart-card {
-  height: 100%;
-  background: rgba(30, 30, 30, 0.6);
-  border: 1px solid rgba(64, 158, 255, 0.3);
-  border-radius: 8px;
-}
-
-.chart-card :deep(.el-card__header) {
-  background: rgba(45, 45, 45, 0.8);
-  border-bottom: 1px solid rgba(64, 158, 255, 0.3);
-  padding: 15px 20px;
-}
-
-.card-header {
+/* 顶部 */
+.app-header {
+  height: 72px;
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
-}
-
-.card-title {
-  font-size: 18px;
-  font-weight: 600;
-  color: #E4E7ED;
-  letter-spacing: 1px;
-}
-
-.chart-card :deep(.el-card__body) {
-  padding: 20px;
-  height: calc(100% - 60px);
-}
-
-.chart-container {
-  width: 100%;
-  height: 100%;
-  min-height: 500px;
-}
-
-/* 底部区域 */
-.footer-section {
-  height: 180px !important;
-  padding: 20px 40px;
   background: rgba(30, 30, 30, 0.8);
-  border-top: 2px solid #409EFF;
+  border-bottom: 2px solid #409EFF;
+  padding: 0 32px;
+  gap: 24px;
 }
-
-.status-row {
-  height: 100%;
-}
-
-.status-card {
-  height: 100%;
-  background: rgba(45, 45, 45, 0.8);
-  border: 1px solid rgba(64, 158, 255, 0.3);
-  border-radius: 8px;
-  transition: all 0.3s ease;
-}
-
-.status-card:hover {
-  border-color: #409EFF;
-  box-shadow: 0 0 20px rgba(64, 158, 255, 0.4);
-  transform: translateY(-2px);
-}
-
-.status-card :deep(.el-card__body) {
-  padding: 20px;
-  height: 100%;
+.header-brand {
   display: flex;
   align-items: center;
-  justify-content: center;
+  gap: 12px;
+  min-width: 280px;
 }
-
-.status-content {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 100%;
-  gap: 20px;
+.brand-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #409EFF;
+  box-shadow: 0 0 12px #409EFF;
 }
-
-.status-icon {
-  color: #409EFF;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.temperature-card .status-icon {
-  color: #F56C6C;
-}
-
-.temperature-card .status-icon svg {
-  stroke: #F56C6C;
-}
-
-.humidity-card .status-icon {
-  color: #409EFF;
-}
-
-.humidity-card .status-icon svg {
-  stroke: #409EFF;
-}
-
-.status-info {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-}
-
-.status-label {
-  font-size: 14px;
-  color: #909399;
-  margin-bottom: 8px;
-  letter-spacing: 1px;
-}
-
-.status-value {
-  font-size: 32px;
-  font-weight: bold;
+.brand-title {
+  font-size: 20px;
+  font-weight: 700;
   color: #E4E7ED;
   letter-spacing: 2px;
 }
-
-.temperature-card .status-value {
-  color: #F56C6C;
+.live-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
-
-.humidity-card .status-value {
+.live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #67C23A;
+  box-shadow: 0 0 8px #67C23A;
+}
+.device-selector {
+  flex: 1;
+  display: flex;
+  justify-content: center;
+  min-width: 0;
+}
+.device-multi-select {
+  width: 100%;
+  max-width: 420px;
+  cursor: pointer;
+}
+.device-multi-select :deep(.el-select__wrapper) {
+  background: rgba(45, 45, 45, 0.9) !important;
+  box-shadow: 0 0 0 1px rgba(64, 158, 255, 0.4) inset !important;
+  min-height: 40px;
+  cursor: pointer;
+}
+.device-multi-select :deep(.el-select__wrapper:hover) {
+  box-shadow: 0 0 0 1px #409EFF inset, 0 0 10px rgba(64, 158, 255, 0.3) !important;
+}
+.device-multi-select :deep(.el-select__selection) {
+  flex-wrap: nowrap;
+}
+/* 保证输入区始终有可点击宽度，不会被已选标签完全遮挡导致下拉打不开 */
+.device-multi-select :deep(.el-select__input) {
+  min-width: 24px;
+  flex: 1;
+}
+.device-multi-select :deep(.el-select__placeholder),
+.device-multi-select :deep(.el-select__selected-item) {
+  color: #E4E7ED;
+  cursor: pointer;
+}
+.device-multi-select :deep(.el-select__suffix) {
+  pointer-events: auto;
+}
+.device-multi-select :deep(.el-select__caret) {
   color: #409EFF;
 }
+.device-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.option-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.option-badge {
+  margin-left: auto;
+  transform: scale(0.85);
+}
+.header-time {
+  min-width: 180px;
+  text-align: right;
+  display: flex;
+  flex-direction: column;
+}
+.time-label {
+  font-size: 12px;
+  color: #909399;
+  letter-spacing: 1px;
+}
+.time-value {
+  font-size: 16px;
+  color: #409EFF;
+  font-weight: 600;
+  font-family: 'Menlo', 'Consolas', monospace;
+}
 
+/* 未确认告警汇总行 */
+.summary-bar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 32px;
+  background: rgba(30, 30, 30, 0.6);
+  border-bottom: 1px solid rgba(64, 158, 255, 0.2);
+}
+.summary-chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  border-radius: 20px;
+  background: rgba(45, 45, 45, 0.8);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  cursor: pointer;
+  transition: all 0.25s ease;
+  user-select: none;
+}
+.summary-chip:hover {
+  border-color: #409EFF;
+  transform: translateY(-1px);
+}
+.summary-chip.is-active {
+  border-color: #409EFF;
+  box-shadow: 0 0 12px rgba(64, 158, 255, 0.35);
+}
+.summary-chip.is-warning {
+  border-color: #E6A23C;
+  box-shadow: 0 0 12px rgba(230, 162, 60, 0.4);
+}
+.summary-chip.is-critical {
+  border-color: #F56C6C;
+  box-shadow: 0 0 14px rgba(245, 108, 108, 0.55);
+  animation: chip-pulse 1.2s ease-in-out infinite;
+}
+@keyframes chip-pulse {
+  0%, 100% { box-shadow: 0 0 14px rgba(245, 108, 108, 0.45); }
+  50% { box-shadow: 0 0 22px rgba(245, 108, 108, 0.8); }
+}
+.summary-chip.is-offline {
+  border-color: #909399;
+  background: rgba(144, 147, 153, 0.12);
+  opacity: 0.85;
+}
+.summary-chip.is-offline .summary-name { color: #909399; }
+.summary-offline {
+  font-size: 13px;
+  font-weight: 600;
+  color: #C0C4CC;
+  font-family: 'Menlo', 'Consolas', monospace;
+}
+.summary-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: #E4E7ED;
+}
+.summary-count {
+  font-size: 16px;
+  font-weight: 700;
+  color: #F56C6C;
+  min-width: 18px;
+  text-align: center;
+}
+.summary-chip.is-warning .summary-count { color: #E6A23C; }
+.summary-label {
+  font-size: 12px;
+  color: #909399;
+}
+.summary-hint {
+  margin-left: auto;
+  font-size: 12px;
+  color: #909399;
+}
+.summary-hint b { color: #409EFF; }
+
+/* 主体 */
+.app-body {
+  flex: 1;
+  min-height: 0;
+  padding: 16px 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+.upper-row {
+  flex: 1.4;
+  min-height: 380px;
+  display: flex;
+  gap: 16px;
+}
+.side-col {
+  width: 360px;
+  flex-shrink: 0;
+  min-height: 0;
+}
+.chart-panel {
+  flex: 1;
+  min-width: 0;
+}
+.status-row {
+  height: 120px;
+  flex-shrink: 0;
+  display: flex;
+  gap: 16px;
+}
+.status-row > :deep(.status-cards) {
+  flex: 1;
+}
+.control-card {
+  width: 220px;
+  flex-shrink: 0;
+  background: rgba(45, 45, 45, 0.8);
+  border: 1px solid rgba(64, 158, 255, 0.3);
+  border-radius: 8px;
+}
+.control-card :deep(.el-card__body) {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.control-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+.control-hint {
+  font-size: 13px;
+  color: #909399;
+}
+.offline-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #909399;
+  font-size: 14px;
+  letter-spacing: 1px;
+}
+.offline-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(144, 147, 153, 0.3);
+  border-top-color: #909399;
+  border-radius: 50%;
+  animation: offline-spin 1s linear infinite;
+}
+@keyframes offline-spin {
+  to { transform: rotate(360deg); }
+}
+.offline-countdown {
+  font-size: 30px;
+  font-weight: 700;
+  color: #909399;
+  font-family: 'Menlo', 'Consolas', monospace;
+}
+.offline-countdown small {
+  font-size: 14px;
+  margin-left: 2px;
+}
 .restart-btn {
-  width: 100%;
-  height: 60px;
+  width: 180px;
+  height: 56px;
   font-size: 16px;
   font-weight: 600;
   letter-spacing: 2px;
@@ -538,53 +590,69 @@ onUnmounted(() => {
   box-shadow: 0 4px 15px rgba(245, 108, 108, 0.4);
   transition: all 0.3s ease;
 }
-
 .restart-btn:hover {
   transform: translateY(-2px);
   box-shadow: 0 6px 20px rgba(245, 108, 108, 0.6);
 }
-
-.restart-btn:active {
-  transform: translateY(0);
+.alert-row {
+  flex: 1;
+  min-height: 220px;
+  display: flex;
+}
+.alert-row > :deep(.alert-card) {
+  flex: 1;
 }
 
-/* 响应式调整 */
-@media (max-width: 1920px) {
-  .chart-container {
-    min-height: 400px;
-  }
+/* 面板通用样式 */
+.panel {
+  background: rgba(30, 30, 30, 0.6);
+  border: 1px solid rgba(64, 158, 255, 0.3);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
 }
-
-/* Element Plus 下拉选项样式覆盖 */
-:deep(.el-select-dropdown) {
-  background-color: rgba(45, 45, 45, 0.95);
-  border: 1px solid #409EFF;
+.panel :deep(.el-card__header) {
+  background: rgba(45, 45, 45, 0.8);
+  border-bottom: 1px solid rgba(64, 158, 255, 0.3);
+  padding: 12px 16px;
 }
-
-:deep(.el-select-dropdown__item) {
+.panel-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+.panel-title {
+  font-size: 16px;
+  font-weight: 600;
   color: #E4E7ED;
+  letter-spacing: 1px;
 }
-
-:deep(.el-select-dropdown__item:hover) {
-  background-color: rgba(64, 158, 255, 0.2);
-}
-
-:deep(.el-select-dropdown__item.selected) {
-  color: #409EFF;
-  background-color: rgba(64, 158, 255, 0.3);
-}
-
-/* 确认对话框样式 */
-:deep(.restart-dialog) {
-  background-color: rgba(30, 30, 30, 0.95);
-  border: 1px solid #409EFF;
-}
-
-:deep(.restart-dialog .el-message-box__title) {
-  color: #E4E7ED;
-}
-
-:deep(.restart-dialog .el-message-box__content) {
+.panel-sub {
+  font-size: 12px;
   color: #909399;
+}
+.chart-panel :deep(.el-card__body) {
+  padding: 12px;
+  flex: 1;
+  min-height: 0;
+}
+.chart-wrap {
+  width: 100%;
+  height: 100%;
+}
+
+@media (max-width: 1440px) {
+  .side-col { width: 320px; }
+  .header-brand { min-width: 240px; }
+}
+@media (max-width: 900px) {
+  .app-header { padding: 0 16px; gap: 12px; }
+  .header-brand { min-width: 0; }
+  .brand-title { font-size: 16px; letter-spacing: 1px; }
+  .header-time { display: none; }
+  .live-tag { display: none; }
+  .app-body { padding: 12px 16px; }
+  .summary-bar { padding: 10px 16px; flex-wrap: wrap; }
+  .summary-hint { width: 100%; margin-left: 0; }
 }
 </style>
